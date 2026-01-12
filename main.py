@@ -5,20 +5,14 @@ from telegram import Update
 from telegram.ext import Updater, MessageHandler, Filters, CommandHandler, CallbackContext
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID"))
 
 def start(update: Update, context: CallbackContext):
-    if update.effective_user.id != ADMIN_ID:
-        return
     update.message.reply_text(
         "🤖 بوت تنفيذ بايثون جاهز\n"
         "أرسل كود Python مباشرة وسيتم تشغيله."
     )
 
 def execute_code(update: Update, context: CallbackContext):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
     code = update.message.text
 
     # حفظ الكود في ملف مؤقت
@@ -31,7 +25,7 @@ def execute_code(update: Update, context: CallbackContext):
             ["python", script_path],
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=300  # 5 دقائق كحد أقصى
         )
         output = (result.stdout or "") + (result.stderr or "")
         if not output.strip():
