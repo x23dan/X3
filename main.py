@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os
+import osع
 import tempfile
 import subprocess
 from telegram import Update
