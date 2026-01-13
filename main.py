@@ -1,218 +1,100 @@
 #!/usr/bin/env python3
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Updater,
-    CommandHandler,
-    MessageHandler,
-    Filters,
-    CallbackQueryHandler,
-    CallbackContext
-)
 import os
+import asyncio
 import tempfile
 import subprocess
-import time
-import threading
-import queue
-from datetime import datetime
-from typing import Dict, List, Optional
-from collections import defaultdict
+from telegram import Update, Document
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
 
-# ────────────────────────────────────────────
-#               الإعدادات
-# ────────────────────────────────────────────
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+MAX_OUTPUT = 4000
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-if not BOT_TOKEN:
-    print("خطأ: لم يتم العثور على BOT_TOKEN")
-    exit(1)
-
-ADMIN_IDS = os.environ.get("ADMIN_IDS", "")
-ADMIN_USERS = [int(x.strip()) for x in ADMIN_IDS.split(",")] if ADMIN_IDS else []
-
-# ────────────────────────────────────────────
-#               هيكل المهمة
-# ────────────────────────────────────────────
-
-class Task:
-    def __init__(self, task_id: str, user_id: int, username: str, code: str):
-        self.id = task_id
-        self.user_id = user_id
-        self.username = username
-        self.code = code
-        self.status = "pending"
-        self.output = ""
-        self.error = ""
-        self.execution_time = 0.0
-        self.start_time = datetime.now()
-
-# ────────────────────────────────────────────
-#               نظام تنفيذ المهام
-# ────────────────────────────────────────────
-
-class CodeExecutor:
-    def __init__(self):
-        self.queue = queue.Queue()
-        self.tasks: Dict[str, Task] = {}
-        self.history: List[Task] = []
-        self.worker = threading.Thread(target=self._worker, daemon=True)
-        self.worker.start()
-
-    def add_task(self, user_id: int, username: str, code: str) -> str:
-        task_id = f"t_{int(time.time()*1000)}_{user_id % 10000}"
-        task = Task(task_id, user_id, username, code)
-        self.tasks[task_id] = task
-        self.queue.put(task)
-        return task_id
-
-    def _worker(self):
-        while True:
-            try:
-                task = self.queue.get(timeout=10)
-                self._run_task(task)
-                self.history.append(task)
-                if len(self.history) > 100:
-                    self.history.pop(0)
-            except queue.Empty:
-                continue
-
-    def _run_task(self, task: Task):
-        task.status = "running"
-
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as tmp:
-            tmp.write(task.code)
-            path = tmp.name
-
-        try:
-            start = time.time()
-            result = subprocess.run(
-                ["python", "-u", path],
-                capture_output=True,
-                text=True,
-                timeout=45,
-                encoding="utf-8",
-                errors="replace"
-            )
-            task.execution_time = time.time() - start
-            task.output = result.stdout.rstrip()
-            task.error  = result.stderr.rstrip()
-            task.status = "done" if result.returncode == 0 else "error"
-        except subprocess.TimeoutExpired:
-            task.status = "timeout"
-            task.error = "انتهى وقت التنفيذ (45 ثانية)"
-        except Exception as e:
-            task.status = "error"
-            task.error = f"خطأ في النظام:\n{str(e)}"
-        finally:
-            try:
-                os.unlink(path)
-            except:
-                pass
-
-    def get_task(self, task_id: str) -> Optional[Task]:
-        return self.tasks.get(task_id)
-
-# ────────────────────────────────────────────
-#               البوت
-# ────────────────────────────────────────────
-
-executor = CodeExecutor()
-
-def start(update: Update, context: CallbackContext):
-    keyboard = [
-        [InlineKeyboardButton("كود جديد", callback_data="new")],
-        [InlineKeyboardButton("مهامي",    callback_data="mine")],
-    ]
-    update.message.reply_text(
-        "مرحباً! أرسل كود بايثون لتشغيله\n"
-        "أو استخدم الأزرار أدناه",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 بوت تنفيذ Python\n\n"
+        "📌 أرسل كود Python مباشرة\n"
+        "📌 أو أرسل ملف .py\n\n"
+        "أوامر:\n"
+        "/run → تنفيذ آخر كود\n"
+        "/clear → مسح الذاكرة"
     )
 
-def new_code_prompt(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-    query.edit_message_text(
-        "أرسل الكود الآن...\n\n"
-        "يمكنك وضعه داخل ```python\nالكود\n```"
-    )
+async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("🧹 تم مسح الذاكرة")
 
-def handle_code(update: Update, context: CallbackContext):
-    text = update.message.text.strip()
+async def run_code(code: str) -> str:
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(code)
+        path = f.name
 
-    if text.startswith("```") and text.endswith("```"):
-        lines = text.splitlines()
-        if lines[0].lower().startswith("```python"):
-            text = "\n".join(lines[1:-1]).strip()
-        else:
-            text = "\n".join(lines[1:-1]).strip()
+    try:
+        result = subprocess.run(
+            ["python3", path],
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        return output or "✅ تم التنفيذ بدون مخرجات"
+    except subprocess.TimeoutExpired:
+        return "⏱️ انتهى الوقت"
+    finally:
+        os.remove(path)
 
-    if len(text) < 3:
-        update.message.reply_text("الكود قصير جدًا")
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    code = update.message.text
+    context.user_data["last_code"] = code
+    output = await run_code(code)
+
+    if len(output) > MAX_OUTPUT:
+        output = output[:MAX_OUTPUT] + "\n... (تم القطع)"
+
+    await update.message.reply_text(f"📤 النتيجة:\n{output}")
+
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc: Document = update.message.document
+    if not doc.file_name.endswith(".py"):
+        await update.message.reply_text("❌ فقط ملفات .py")
         return
 
-    task_id = executor.add_task(
-        update.effective_user.id,
-        update.effective_user.username or update.effective_user.first_name,
-        text
-    )
+    file = await doc.get_file()
+    code = await file.download_as_bytearray()
+    code = code.decode()
 
-    update.message.reply_text(
-        f"تم إضافة المهمة\n"
-        f"معرف المهمة: `{task_id}`\n"
-        "انتظر قليلاً...",
-        parse_mode="Markdown"
-    )
+    context.user_data["last_code"] = code
+    output = await run_code(code)
 
-def status(update: Update, context: CallbackContext):
-    if not context.args:
-        update.message.reply_text("اكتب: /status <معرف_المهمة>")
+    if len(output) > MAX_OUTPUT:
+        output = output[:MAX_OUTPUT] + "\n... (تم القطع)"
+
+    await update.message.reply_text(f"📤 النتيجة:\n{output}")
+
+async def run_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    code = context.user_data.get("last_code")
+    if not code:
+        await update.message.reply_text("❌ لا يوجد كود محفوظ")
         return
 
-    task = executor.get_task(context.args[0])
+    output = await run_code(code)
+    await update.message.reply_text(f"🔁 إعادة التنفيذ:\n{output}")
 
-    if not task:
-        update.message.reply_text("لم يتم العثور على المهمة")
-        return
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    msg = [
-        f"🆔 {task.id}",
-        f"الحالة: {task.status}",
-        f"المستخدم: {task.username}",
-        f"الوقت: {task.execution_time:.2f} ث",
-    ]
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CommandHandler("run", run_last))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
-    if task.output:
-        msg.append("\nالمخرجات:")
-        msg.append("─" * 40)
-        msg.append(task.output)
-        msg.append("─" * 40)
-
-    if task.error:
-        msg.append("\nالأخطاء:")
-        msg.append("─" * 40)
-        msg.append(task.error)
-        msg.append("─" * 40)
-
-    # بدون parse_mode لتجنب مشاكل الـ entities
-    update.message.reply_text("\n".join(msg))
-
-# ────────────────────────────────────────────
-#               التشغيل
-# ────────────────────────────────────────────
-
-def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("status", status))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_code))
-    dp.add_handler(CallbackQueryHandler(new_code_prompt, pattern="^new$"))
-
-    print("البوت يعمل...")
-    updater.start_polling(drop_pending_updates=True)
-    updater.idle()
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
