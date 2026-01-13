@@ -131,7 +131,7 @@ class CodeExecutorBot:
                 [os.sys.executable, script_path],
                 capture_output=True,
                 text=True,
-                timeout=60,  # زيادة وقت التنفيذ إلى 60 ثانية
+                timeout=60,
                 encoding='utf-8',
                 errors='ignore'
             )
@@ -146,9 +146,11 @@ class CodeExecutorBot:
             if task.status == "completed":
                 self.user_stats[task.user_id]['success'] += 1
                 self.system_stats['successful_tasks'] += 1
+                self.system_stats['total_execution_time'] += execution_time
             else:
                 self.user_stats[task.user_id]['errors'] += 1
                 self.system_stats['failed_tasks'] += 1
+                self.system_stats['total_execution_time'] += execution_time
             
         except subprocess.TimeoutExpired:
             task.status = "failed"
@@ -199,13 +201,11 @@ def start(update: Update, context: CallbackContext):
         [InlineKeyboardButton("❓ المساعدة", callback_data='help')],
     ]
     
-    # إضافة لوحة التحكم للمشرفين
     if user.id in ADMIN_USERS:
         keyboard.append([InlineKeyboardButton("⚙️ لوحة التحكم", callback_data='dashboard')])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # استخدام reply_text بأمان
     update.message.reply_text(
         f"👋 مرحباً {user.first_name}!\n"
         "🤖 بوت تنفيذ كود Python\n"
@@ -225,25 +225,20 @@ def handle_code_input(update: Update, context: CallbackContext):
     user = update.effective_user
     code = update.message.text
     
-    # تجاهل الأوامر
     if code.startswith('/'):
         return
     
-    # إذا كان الكود محاطًا بعلامات ```
     if code.startswith('```') and code.endswith('```'):
         code = code[3:-3].strip()
         if code.lower().startswith('python'):
             code = code[6:].strip()
     
-    # التحقق من طول الكود
     if len(code) > 5000:
         update.message.reply_text("⚠️ الكود طويل جداً. الحد الأقصى 5000 حرف.")
         return
     
-    # إضافة المهمة للطابور
     task_id = bot.add_task(user.id, user.username or user.first_name, code)
     
-    # إرسال رسالة تأكيد
     update.message.reply_text(
         f"✅ **تم إضافة المهمة للتنفيذ**\n\n"
         f"🆔 **معرف المهمة:** `{task_id}`\n"
@@ -284,7 +279,6 @@ def status_command(update: Update, context: CallbackContext):
         )
         return
     
-    # التحقق من الصلاحيات
     if task.user_id != user.id and user.id not in ADMIN_USERS:
         update.message.reply_text("⛔ ليس لديك صلاحية عرض هذه المهمة")
         return
@@ -319,7 +313,6 @@ def status_command(update: Update, context: CallbackContext):
             error_preview = task.error[:500] + ("..." if len(task.error) > 500 else "")
             status_text += f"\n❌ **الخطأ:**\n```\n{error_preview}\n```"
     
-    # إضافة أزرار للتحكم
     keyboard = []
     if user.id == task.user_id or user.id in ADMIN_USERS:
         keyboard.append([InlineKeyboardButton("🔄 تحديث الحالة", callback_data=f'status_{task_id}')])
@@ -330,16 +323,11 @@ def status_command(update: Update, context: CallbackContext):
 
 def my_tasks_command(update: Update, context: CallbackContext):
     """عرض مهام المستخدم الأخيرة"""
-    # تحديد مصدر الرسالة (من رسالة عادية أو callback query)
     if update.message:
-        # الحالة العادية: من أمر /mytasks
-        chat_id = update.message.chat_id
         reply_method = update.message.reply_text
         can_edit = False
     elif update.callback_query:
-        # الحالة: من ضغط زر
         query = update.callback_query
-        chat_id = query.message.chat_id
         reply_method = query.edit_message_text
         can_edit = True
         query.answer()
@@ -363,14 +351,12 @@ def my_tasks_command(update: Update, context: CallbackContext):
         status_icon = '✅' if task.status == 'completed' else '❌' if task.status == 'failed' else '⏳'
         time_str = task.start_time.strftime('%H:%M') if task.start_time else 'N/A'
         
-        # عرض جزء من الكود
         code_preview = task.code[:40] + "..." if len(task.code) > 40 else task.code
         tasks_text += f"{i}. {status_icon} **{task.status}**\n"
         tasks_text += f"   🆔 `{task.id}`\n"
         tasks_text += f"   📝 {code_preview}\n"
         tasks_text += f"   🕐 {time_str} | ⏱️ {task.execution_time:.2f}s\n\n"
     
-    # إضافة زر لتحديث القائمة
     keyboard = [
         [InlineKeyboardButton("🔄 تحديث القائمة", callback_data='my_tasks'),
          InlineKeyboardButton("🚀 كود جديد", callback_data='new_code')]
@@ -385,7 +371,6 @@ def my_tasks_command(update: Update, context: CallbackContext):
 
 def dashboard_command(update: Update, context: CallbackContext):
     """لوحة التحكم للمشرفين"""
-    # تحديد مصدر الرسالة
     if update.message:
         reply_method = update.message.reply_text
         can_edit = False
@@ -410,7 +395,6 @@ def dashboard_command(update: Update, context: CallbackContext):
     system_stats = bot.system_stats
     recent_tasks = bot.get_recent_tasks(5)
     
-    # حساب متوسط وقت التنفيذ
     avg_time = system_stats['total_execution_time'] / system_stats['total_tasks'] if system_stats['total_tasks'] > 0 else 0
     
     dashboard_text = f"""
@@ -447,20 +431,193 @@ def dashboard_command(update: Update, context: CallbackContext):
 
 def help_command(update: Update, context: CallbackContext):
     """عرض المساعدة"""
-    help_text = """
-📚 **مساعدة بوت تنفيذ الكود**
+    # تقسيم النص إلى أجزاء لتجنب مشاكل السلاسل الطويلة
+    help_text = "📚 **مساعدة بوت تنفيذ الكود**\n\n"
+    help_text += "🤖 **الأوامر المتاحة:**\n"
+    help_text += "/start - بدء البوت وعرض القائمة\n"
+    help_text += "/help - عرض هذه الرسالة\n"
+    help_text += "/status <task_id> - عرض حالة مهمة\n"
+    help_text += "/mytasks - عرض مهامي الأخيرة\n"
+    help_text += "/dashboard - لوحة التحكم (للمشرفين فقط)\n\n"
+    
+    help_text += "🚀 **كيفية الاستخدام:**\n"
+    help_text += "1. أرسل كود Python مباشرة\n"
+    help_text += "2. أو استخدم علامات ``` للكود الطويل\n"
+    help_text += "3. انتظر تنفيذ المهمة\n"
+    help_text += "4. تابع حالة المهمة بـ /status\n\n"
+    
+    help_text += "💡 **أمثلة:**\n"
+    help_text += "```\n"
+    help_text += "print(\"Hello World!\")\n"
+    help_text += "```\n"
+    help_text += "أو\n"
+    help_text += "```python\n"
+    help_text += "for i in range(5):\n"
+    help_text += "    print(i)\n"
+    help_text += "```\n\n"
+    
+    help_text += "⚡ **المميزات:**\n"
+    help_text += "• وقت تنفيذ 60 ثانية\n"
+    help_text += "• دعم جميع مكتبات Python\n"
+    help_text += "• تشغيل متعدد المهام\n"
+    help_text += "• عرض النتائج فوراً\n\n"
+    
+    help_text += "⚠️ **ملاحظات أمان:**\n"
+    help_text += "• لا تقم بتنفيذ كود غير موثوق\n"
+    help_text += "• الكود يعمل في بيئة معزولة\n"
+    help_text += "• المهام تحفظ لمدة ساعة فقط\n\n"
+    
+    help_text += "📞 **للمساعدة:** @your_username"
+    
+    if update.message:
+        update.message.reply_text(help_text, parse_mode='Markdown')
+    elif update.callback_query:
+        query = update.callback_query
+        query.answer()
+        query.edit_message_text(help_text, parse_mode='Markdown')
 
-🤖 **الأوامر المتاحة:**
-/start - بدء البوت وعرض القائمة
-/help - عرض هذه الرسالة
-/status <task_id> - عرض حالة مهمة
-/mytasks - عرض مهامي الأخيرة
-/dashboard - لوحة التحكم (للمشرفين فقط)
+def button_callback(update: Update, context: CallbackContext):
+    """معالجة ضغطات الأزرار"""
+    query = update.callback_query
+    data = query.data
+    
+    query.answer()
+    
+    if data == 'new_code':
+        query.edit_message_text(
+            "📝 **إرسال الكود للتنفيذ**\n\n"
+            "**يمكنك إرسال الكود الآن:**\n"
+            "• بشكل مباشر\n"
+            "• أو محاط بعلامات ```\n\n"
+            "**⚡ المميزات:**\n"
+            "• ⏱️ وقت التنفيذ: 60 ثانية\n"
+            "• 📦 دعم جميع المكتبات\n"
+            "• 🔄 تشغيل متعدد المهام\n\n"
+            "**📝 مثال:**\n"
+            "```python\n"
+            "import random\n"
+            "print(random.randint(1, 100))\n"
+            "```",
+            parse_mode='Markdown'
+        )
+    
+    elif data == 'my_tasks':
+        my_tasks_command(update, context)
+    
+    elif data == 'help':
+        help_command(update, context)
+    
+    elif data == 'dashboard':
+        dashboard_command(update, context)
+    
+    elif data == 'refresh_dashboard':
+        query.answer("🔄 يتم تحديث لوحة التحكم...")
+        dashboard_command(update, context)
+    
+    elif data.startswith('status_'):
+        task_id = data[7:]
+        context.args = [task_id]
+        status_command(update, context)
+    
+    elif data == 'cleanup':
+        cutoff_time = datetime.now() - timedelta(hours=1)
+        old_tasks = [tid for tid, task in bot.tasks.items() 
+                    if task.end_time and task.end_time < cutoff_time]
+        
+        cleaned_count = len(old_tasks)
+        for task_id in old_tasks:
+            del bot.tasks[task_id]
+        
+        query.answer(f"✅ تم تنظيف {cleaned_count} مهمة قديمة")
+        dashboard_command(update, context)
+    
+    elif data == 'full_stats':
+        user_stats_text = "📊 **إحصائيات المستخدمين:**\n\n"
+        for user_id, stats in list(bot.user_stats.items())[:10]:
+            user_stats_text += f"👤 **المستخدم:** {user_id}\n"
+            user_stats_text += f"   • 📋 المهام: {stats['tasks']}\n"
+            user_stats_text += f"   • ✅ الناجحة: {stats['success']}\n"
+            user_stats_text += f"   • ❌ الفاشلة: {stats['errors']}\n\n"
+        
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data='dashboard')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        query.edit_message_text(user_stats_text, parse_mode='Markdown', reply_markup=reply_markup)
+    
+    else:
+        query.answer("⚠️ خيار غير معروف")
 
-🚀 **كيفية الاستخدام:**
-1. أرسل كود Python مباشرة
-2. أو استخدم علامات ``` للكود الطويل
-3. انتظر تنفيذ المهمة
-4. تابع حالة المهمة بـ /status
+def error_handler(update: Update, context: CallbackContext):
+    """معالج الأخطاء العام"""
+    try:
+        print(f"ERROR: {context.error}")
+        
+        if update:
+            if update.message:
+                update.message.reply_text("❌ حدث خطأ أثناء معالجة طلبك")
+            elif update.callback_query:
+                update.callback_query.answer("❌ حدث خطأ، يرجى المحاولة لاحقاً", show_alert=True)
+    except Exception as e:
+        print(f"Error in error handler: {e}")
 
-💡 **أمثلة:**
+# ============ التنفيذ الرئيسي المعدل للعمل على Railway ============
+
+def main():
+    """الدالة الرئيسية المعدلة للعمل على Railway"""
+    if not BOT_TOKEN:
+        print("❌ يرجى تعيين متغير البيئة BOT_TOKEN على Railway")
+        print("💡 اذهب إلى Settings → Variables في لوحة تحكم Railway")
+        return
+    
+    print(f"🚀 بدء تشغيل البوت على Railway...")
+    print(f"🤖 توكن البوت: {BOT_TOKEN[:10]}...")
+    print(f"👥 المشرفون: {ADMIN_USERS}")
+    print(f"🌐 PORT: {PORT}")
+    
+    if WEBHOOK_URL:
+        print(f"🌐 استخدام Webhook: {WEBHOOK_URL}")
+    else:
+        print("🔄 استخدام Polling (لتطوير محلي)")
+    
+    updater = Updater(
+        BOT_TOKEN,
+        use_context=True,
+        request_kwargs={
+            'read_timeout': 30,
+            'connect_timeout': 30,
+        }
+    )
+    
+    dp = updater.dispatcher
+    
+    dp.add_error_handler(error_handler)
+    
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("status", status_command))
+    dp.add_handler(CommandHandler("mytasks", my_tasks_command))
+    dp.add_handler(CommandHandler("dashboard", dashboard_command))
+    
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_code_input))
+    dp.add_handler(CallbackQueryHandler(button_callback))
+    
+    if WEBHOOK_URL:
+        updater.start_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=BOT_TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}"
+        )
+    else:
+        updater.start_polling(
+            timeout=30,
+            drop_pending_updates=True,
+            allowed_updates=['message', 'callback_query']
+        )
+    
+    print("✅ البوت يعمل بنجاح!")
+    print("📱 اذهب إلى التيليجرام واستخدم /start")
+    
+    updater.idle()
+
+if __name__ == "__main__":
+    main()
