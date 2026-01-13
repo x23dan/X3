@@ -36,11 +36,12 @@ def run_code(code: str) -> str:
         path = f.name
 
     try:
+        # تعديل الوقت ليصل إلى 24 ساعة
         result = subprocess.run(
             ["python3", path],
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=24*60*60  # 86400 ثانية = 24 ساعة
         )
         output = (result.stdout or "") + (result.stderr or "")
         return output or "✅ تم التنفيذ بدون مخرجات"
