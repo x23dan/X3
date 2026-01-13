@@ -1,276 +1,218 @@
 #!/usr/bin/env python3
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Updater,
+    CommandHandler,
+    MessageHandler,
+    Filters,
+    CallbackQueryHandler,
+    CallbackContext
+)
 import os
 import tempfile
 import subprocess
-import re
 import time
-import json
 import threading
 import queue
-from datetime import datetime, timedelta
-from collections import defaultdict
+from datetime import datetime
 from typing import Dict, List, Optional
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    MessageHandler,
-    filters,
-    CommandHandler,
-    CallbackContext,
-    CallbackQueryHandler
-)
+from collections import defaultdict
 
-# ============================================
-#               تهيئة المتغيرات
-# ============================================
+# ────────────────────────────────────────────
+#               الإعدادات
+# ────────────────────────────────────────────
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    print("خطأ: لم يتم العثور على BOT_TOKEN")
+    exit(1)
+
 ADMIN_IDS = os.environ.get("ADMIN_IDS", "")
 ADMIN_USERS = [int(x.strip()) for x in ADMIN_IDS.split(",")] if ADMIN_IDS else []
 
-PORT = int(os.environ.get("PORT", 8443))
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
-
-# ============================================
-#               هياكل البيانات
-# ============================================
-
-TASK_HISTORY_SIZE = 100
+# ────────────────────────────────────────────
+#               هيكل المهمة
+# ────────────────────────────────────────────
 
 class Task:
-    def __init__(self, task_id: str, user_id: int, code: str):
+    def __init__(self, task_id: str, user_id: int, username: str, code: str):
         self.id = task_id
         self.user_id = user_id
-        self.username = ""
+        self.username = username
         self.code = code
         self.status = "pending"
-        self.result = ""
-        self.start_time = None
-        self.end_time = None
-        self.execution_time = 0
         self.output = ""
         self.error = ""
+        self.execution_time = 0.0
+        self.start_time = datetime.now()
 
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'user_id': self.user_id,
-            'username': self.username,
-            'code': self.code[:50] + "..." if len(self.code) > 50 else self.code,
-            'status': self.status,
-            'start_time': str(self.start_time) if self.start_time else None,
-            'end_time': str(self.end_time) if self.end_time else None,
-            'execution_time': self.execution_time,
-            'has_output': bool(self.output),
-            'has_error': bool(self.error)
-        }
+# ────────────────────────────────────────────
+#               نظام تنفيذ المهام
+# ────────────────────────────────────────────
 
-class CodeExecutorBot:
+class CodeExecutor:
     def __init__(self):
-        self.task_queue = queue.Queue()
+        self.queue = queue.Queue()
         self.tasks: Dict[str, Task] = {}
-        self.task_history: List[Task] = []
-        self.user_stats = defaultdict(lambda: {'tasks': 0, 'success': 0, 'errors': 0})
-        self.system_stats = {
-            'total_tasks': 0,
-            'successful_tasks': 0,
-            'failed_tasks': 0,
-            'total_execution_time': 0
-        }
-        self.is_running = True
-        self.worker_thread = threading.Thread(target=self._task_worker, daemon=True)
-        self.worker_thread.start()
+        self.history: List[Task] = []
+        self.worker = threading.Thread(target=self._worker, daemon=True)
+        self.worker.start()
 
     def add_task(self, user_id: int, username: str, code: str) -> str:
-        task_id = f"task_{int(time.time())}_{user_id}_{hash(code) % 10000}"
-        task = Task(task_id, user_id, code)
-        task.username = username
-        task.start_time = datetime.now()
+        task_id = f"t_{int(time.time()*1000)}_{user_id % 10000}"
+        task = Task(task_id, user_id, username, code)
         self.tasks[task_id] = task
-        self.task_queue.put(task)
-        self.user_stats[user_id]['tasks'] += 1
-        self.system_stats['total_tasks'] += 1
+        self.queue.put(task)
         return task_id
 
-    def _task_worker(self):
-        while self.is_running:
+    def _worker(self):
+        while True:
             try:
-                task = self.task_queue.get(timeout=1)
-                self._execute_task(task)
-                self.task_history.append(task)
-                if len(self.task_history) > TASK_HISTORY_SIZE:
-                    self.task_history.pop(0)
+                task = self.queue.get(timeout=10)
+                self._run_task(task)
+                self.history.append(task)
+                if len(self.history) > 100:
+                    self.history.pop(0)
             except queue.Empty:
                 continue
-            except Exception as e:
-                print(f"Worker error: {e}")
 
-    def _execute_task(self, task: Task):
+    def _run_task(self, task: Task):
         task.status = "running"
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
-            f.write(task.code)
-            script_path = f.name
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as tmp:
+            tmp.write(task.code)
+            path = tmp.name
 
         try:
             start = time.time()
             result = subprocess.run(
-                [os.sys.executable, "-u", script_path],
+                ["python", "-u", path],
                 capture_output=True,
                 text=True,
-                timeout=60,
-                encoding='utf-8',
-                errors='replace'
+                timeout=45,
+                encoding="utf-8",
+                errors="replace"
             )
             task.execution_time = time.time() - start
-            task.output = result.stdout
-            task.error = result.stderr
-            task.status = "completed" if result.returncode == 0 else "failed"
-
+            task.output = result.stdout.rstrip()
+            task.error  = result.stderr.rstrip()
+            task.status = "done" if result.returncode == 0 else "error"
         except subprocess.TimeoutExpired:
-            task.status = "failed"
-            task.error = "انتهى وقت التنفيذ (الحد الأقصى 60 ثانية)"
+            task.status = "timeout"
+            task.error = "انتهى وقت التنفيذ (45 ثانية)"
         except Exception as e:
-            task.status = "failed"
-            task.error = f"خطأ أثناء التنفيذ:\n{str(e)}"
+            task.status = "error"
+            task.error = f"خطأ في النظام:\n{str(e)}"
         finally:
             try:
-                os.unlink(script_path)
+                os.unlink(path)
             except:
                 pass
 
     def get_task(self, task_id: str) -> Optional[Task]:
         return self.tasks.get(task_id)
 
-    def get_user_tasks(self, user_id: int) -> List[Task]:
-        return [t for t in self.task_history if t.user_id == user_id][-10:]
+# ────────────────────────────────────────────
+#               البوت
+# ────────────────────────────────────────────
 
-# ============================================
-#                 البوت نفسه
-# ============================================
+executor = CodeExecutor()
 
-bot_instance = CodeExecutorBot()
-
-# ============================================
-#              دوال المعالجات
-# ============================================
-
-async def start(update: Update, context: CallbackContext):
-    user = update.effective_user
+def start(update: Update, context: CallbackContext):
     keyboard = [
-        [InlineKeyboardButton("🚀 تشغيل كود جديد", callback_data='new_code')],
-        [InlineKeyboardButton("📋 مهامي الأخيرة", callback_data='my_tasks')],
-        [InlineKeyboardButton("❓ المساعدة", callback_data='help')],
+        [InlineKeyboardButton("كود جديد", callback_data="new")],
+        [InlineKeyboardButton("مهامي",    callback_data="mine")],
     ]
-    if user.id in ADMIN_USERS:
-        keyboard.append([InlineKeyboardButton("⚙️ لوحة التحكم", callback_data='dashboard')])
-
-    await update.message.reply_text(
-        f"👋 مرحباً {user.first_name}!\n"
-        "هذا بوت لتشغيل أكواد Python\n\n"
-        "اكتب الكود مباشرة أو استخدم ```python\nالكود هنا\n```",
+    update.message.reply_text(
+        "مرحباً! أرسل كود بايثون لتشغيله\n"
+        "أو استخدم الأزرار أدناه",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def handle_code(update: Update, context: CallbackContext):
-    if update.message.text.startswith('/'):
+def new_code_prompt(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    query.edit_message_text(
+        "أرسل الكود الآن...\n\n"
+        "يمكنك وضعه داخل ```python\nالكود\n```"
+    )
+
+def handle_code(update: Update, context: CallbackContext):
+    text = update.message.text.strip()
+
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        if lines[0].lower().startswith("```python"):
+            text = "\n".join(lines[1:-1]).strip()
+        else:
+            text = "\n".join(lines[1:-1]).strip()
+
+    if len(text) < 3:
+        update.message.reply_text("الكود قصير جدًا")
         return
 
-    code = update.message.text.strip()
-    if code.startswith('```') and code.endswith('```'):
-        code = code.strip('`').strip()
-        if code.lower().startswith('python'):
-            code = code[6:].strip()
-
-    if len(code) > 8000:
-        await update.message.reply_text("الكود طويل جداً (الحد الأقصى ~8000 حرف)")
-        return
-
-    task_id = bot_instance.add_task(
+    task_id = executor.add_task(
         update.effective_user.id,
         update.effective_user.username or update.effective_user.first_name,
-        code
+        text
     )
 
-    await update.message.reply_text(
-        f"تم إضافة المهمة #{task_id}\n"
-        "سيتم تنفيذ الكود قريباً...\n\n"
-        f"للمتابعة: /status {task_id}"
+    update.message.reply_text(
+        f"تم إضافة المهمة\n"
+        f"معرف المهمة: `{task_id}`\n"
+        "انتظر قليلاً...",
+        parse_mode="Markdown"
     )
 
-async def status(update: Update, context: CallbackContext):
+def status(update: Update, context: CallbackContext):
     if not context.args:
-        await update.message.reply_text("استخدام: /status <task_id>")
+        update.message.reply_text("اكتب: /status <معرف_المهمة>")
         return
 
-    task_id = context.args[0]
-    task = bot_instance.get_task(task_id)
+    task = executor.get_task(context.args[0])
 
     if not task:
-        await update.message.reply_text("لم يتم العثور على هذه المهمة")
+        update.message.reply_text("لم يتم العثور على المهمة")
         return
 
-    lines = [
-        f"🆔 المهمة: {task.id}",
+    msg = [
+        f"🆔 {task.id}",
         f"الحالة: {task.status}",
         f"المستخدم: {task.username}",
-        f"الوقت: {task.execution_time:.2f} ثانية"
+        f"الوقت: {task.execution_time:.2f} ث",
     ]
 
     if task.output:
-        lines.append("\nالمخرجات:")
-        lines.append("----------------------------------------")
-        lines.append(task.output.rstrip())
-        lines.append("----------------------------------------")
+        msg.append("\nالمخرجات:")
+        msg.append("─" * 40)
+        msg.append(task.output)
+        msg.append("─" * 40)
 
     if task.error:
-        lines.append("\nالأخطاء:")
-        lines.append("----------------------------------------")
-        lines.append(task.error.rstrip())
-        lines.append("----------------------------------------")
+        msg.append("\nالأخطاء:")
+        msg.append("─" * 40)
+        msg.append(task.error)
+        msg.append("─" * 40)
 
-    # الطريقة الأكثر أماناً: بدون parse_mode
-    await update.message.reply_text("\n".join(lines))
+    # بدون parse_mode لتجنب مشاكل الـ entities
+    update.message.reply_text("\n".join(msg))
 
-# يمكنك إكمال باقي الدوال (my_tasks, dashboard, buttons...) بنفس الطريقة
-# أهم شيء: عند عرض output أو error → لا تستخدم parse_mode='Markdown'
+# ────────────────────────────────────────────
+#               التشغيل
+# ────────────────────────────────────────────
 
-# ============================================
-#                   التشغيل
-# ============================================
+def main():
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-async def main():
-    if not BOT_TOKEN:
-        print("خطأ: لم يتم العثور على BOT_TOKEN")
-        return
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("status", status))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_code))
+    dp.add_handler(CallbackQueryHandler(new_code_prompt, pattern="^new$"))
 
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("status", status))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_code))
-
-    # أضف باقي الهاندلرز هنا...
-
-    print("البوت يبدأ التشغيل...")
-    await application.initialize()
-
-    if WEBHOOK_URL:
-        await application.start_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=BOT_TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}"
-        )
-    else:
-        await application.start()
-        await application.updater.start_polling(
-            drop_pending_updates=True,
-            timeout=30
-        )
-
-    await application.updater.idle()
+    print("البوت يعمل...")
+    updater.start_polling(drop_pending_updates=True)
+    updater.idle()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
