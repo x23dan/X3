@@ -3,7 +3,7 @@ import os
 import tempfile
 import asyncio
 from multiprocessing import Process, Queue
-from telegram import Update, Document
+from telegram import Update, Document, InputFile
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -13,10 +13,10 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MAX_OUTPUT = 4000000
+MAX_OUTPUT = 40000  # أقصى عدد أحرف للطباعة مباشرة
 CODE_TIMEOUT = 60  # ثواني لكل كود
 
-# ======================== تنفيذ الكود في Process ========================
+# ======================== Helpers ========================
 
 def worker(code: str, q: Queue):
     import subprocess
@@ -59,6 +59,19 @@ async def run_code(code: str) -> str:
     except Exception:
         return "❌ فشل استرجاع المخرجات"
 
+def trim_output(output: str) -> tuple[str, str | None]:
+    """
+    إذا تجاوز النص MAX_OUTPUT، نحفظه في ملف مؤقت للإرسال.
+    ترجع tuple: (text_to_send, file_path)
+    """
+    if len(output) <= MAX_OUTPUT:
+        return output, None
+
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
+    tmp.write(output)
+    tmp.close()
+    return f"📄 النتيجة طويلة جدًا، تم حفظها في ملف:", tmp.name
+
 # ======================== Handlers ========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -67,21 +80,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 أرسل كود Python مباشرة\n"
         "📌 أو أرسل ملف .py\n\n"
         "أوامر:\n"
-        "/clear → مسح الذاكرة (إذا وجدت)"
+        "/run → إعادة تنفيذ آخر كود\n"
+        "/clear → مسح الذاكرة"
     )
 
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("🧹 تم مسح الذاكرة")
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    code = update.message.text
-
+async def handle_code(code: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["last_code"] = code
     output = await run_code(code)
-    if len(output) > MAX_OUTPUT:
-        output = output[:MAX_OUTPUT] + "\n... (تم القطع)"
+    text, file_path = trim_output(output)
 
-    await update.message.reply_text(f"📤 النتيجة:\n{output}")
+    if file_path:
+        await update.message.reply_text(text)
+        await update.message.reply_document(InputFile(file_path, filename="output.txt"))
+        os.remove(file_path)
+    else:
+        await update.message.reply_text(f"📤 النتيجة:\n{text}")
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await handle_code(update.message.text, update, context)
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc: Document = update.message.document
@@ -89,7 +109,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ فقط ملفات .py")
         return
 
-    if doc.file_size > 5_000_000:  # 5 ميغا كحد أقصى
+    if doc.file_size > 10_000_000:  # 10 ميغا كحد أقصى الآن
         await update.message.reply_text("❌ الملف كبير جدًا")
         return
 
@@ -101,11 +121,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ فشل قراءة الملف")
         return
 
-    output = await run_code(code)
-    if len(output) > MAX_OUTPUT:
-        output = output[:MAX_OUTPUT] + "\n... (تم القطع)"
+    await handle_code(code, update, context)
 
-    await update.message.reply_text(f"📤 النتيجة:\n{output}")
+async def run_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    code = context.user_data.get("last_code")
+    if not code:
+        await update.message.reply_text("❌ لا يوجد كود محفوظ")
+        return
+
+    await handle_code(code, update, context)
 
 # ======================== البداية ========================
 
@@ -119,66 +143,11 @@ def main():
     # إضافة الأوامر والمعالجات
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("clear", clear))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-
-    # تشغيل البوت
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()        output = output[:MAX_OUTPUT] + "\n... (تم القطع)"
-
-    await update.message.reply_text(f"📤 النتيجة:\n{output}")
-
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc: Document = update.message.document
-
-    if not doc.file_name.endswith(".py"):
-        await update.message.reply_text("❌ فقط ملفات .py")
-        return
-
-    if doc.file_size > 5_000_000:
-        await update.message.reply_text("❌ الملف كبير جدًا")
-        return
-
-    file = await doc.get_file()
-    code = (await file.download_as_bytearray()).decode(errors="ignore")
-
-    context.user_data["last_code"] = code
-    output = run_code(code)
-
-    if len(output) > MAX_OUTPUT:
-        output = output[:MAX_OUTPUT] + "\n... (تم القطع)"
-
-    await update.message.reply_text(f"📤 النتيجة:\n{output}")
-
-async def run_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    code = context.user_data.get("last_code")
-    if not code:
-        await update.message.reply_text("❌ لا يوجد كود محفوظ")
-        return
-
-    output = run_code(code)
-    if len(output) > MAX_OUTPUT:
-        output = output[:MAX_OUTPUT] + "\n... (تم القطع)"
-
-    await update.message.reply_text(f"🔁 إعادة التنفيذ:\n{output}")
-
-# ======================== BOOT ========================
-
-def main():
-    if not BOT_TOKEN:
-        print("❌ BOT_TOKEN غير موجود")
-        return
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("run", run_last))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
+    # تشغيل البوت
     app.run_polling()
 
 if __name__ == "__main__":
