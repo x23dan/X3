@@ -9,7 +9,8 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN = "7573538130:AAGj8S9UIGxI8WTIEux6mJCMq1nRsHXEJow"
+#os.environ.get("BOT_TOKEN")
 CODE_TIMEOUT = 60
 MAX_OUTPUT = 40000
 MAX_FILE_SIZE = 5_000_000  # 5MB
